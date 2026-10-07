@@ -18,12 +18,14 @@ from reportlab.lib.pagesizes import A4								# PDF page size constant
 from reportlab.lib.styles import getSampleStyleSheet						# Basic text styles for PDF.
 from reportlab.lib import colors								# Color constants for PDF styling
 from reportlab.graphics.shapes import Drawing
+from argon2 import PasswordHasher # for password hashing
 
 # ======================================================
 # CONFIG & SETUP
 # ======================================================
 st.set_page_config(page_title="SuperMart POS Suite", layout="wide", page_icon="🛒")		# Sets the Streamlit page title, layout (wide), and icon (shopping cart).
-DB_NAME = "inventory.db"									# Defines the SQLite file name called inventory.db that is used across the app.
+DB_NAME = "inventory.db"								# Defines the SQLite file name called inventory.db that is used across the app.
+pwh = PasswordHasher()
 
 # ======================================================
 # DATABASE MANAGER
@@ -40,11 +42,19 @@ def init_db():												# Creates all required tables and seeds a default admi
     c.execute("""CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT UNIQUE,
-        password TEXT,
-        role TEXT
+        password TEXT NOT NULL,
+        role TEXT NOT NULL
     )""")
-    # Default Admin (Password is plain text for demo only)
-    c.execute("INSERT OR IGNORE INTO users (username, password, role) VALUES ('admin', 'admin123', 'admin')")    		# Seeds an admin if not present
+    # Default admin hashed to prevent plain password from being stored in database
+    admin_password = "admin123"
+    admin_password = pwh.hash(admin_password)
+
+    c.execute(
+    "INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
+    ("admin", admin_password, "admin")
+    ) # Seeds an admin if not present
+
+    
 
     # 2. Suppliers: Suppliers table with contact info; name is unique.
     c.execute("""CREATE TABLE IF NOT EXISTS suppliers (
@@ -141,41 +151,181 @@ def init_db():												# Creates all required tables and seeds a default admi
 
 
 # ======================================================
-# HELPER FUNCTIONS
+#  FUNCTIONS
 # ======================================================
 
 def authenticate(username, password):											# Looks up user by username/password; returns (user_id, role) or None.
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT user_id, role FROM users WHERE username=? AND password=?", (username, password))
+
+    # The ? is a parameter placeholder. The username is supplied separately
+    # to help prevent SQL injection attacks.
+    c.execute("SELECT user_id, password, role FROM users WHERE username=?", (username,))
+    
+    # Get the first matching user from the database.
+    # If no user exists with this username, fetchone() returns None.
     user = c.fetchone()
     conn.close()
-    return user
 
-def transfer_stock(item_id, qty):											# Moves quantity from warehouse_stock to store_stock atomically.
+    if not user:
+        return None
+
+    user_id, stored_hash, role = user
+
+    try:
+        pwh.verify(stored_hash, password)
+        return (user_id, role)
+
+    except Exception:
+        return None
+
+def validate_supplier(name, contact_person, phone, email, address):
+    """
+    Validates supplier information before it is stored in the database.
+
+    Returns:
+        None if all input is valid.
+        An error message if validation fails.
+    """
+
+    # Remove unnecessary spaces from the beginning and end
+    name = name.strip()
+    contact_person = contact_person.strip()
+    phone = phone.strip()
+    email = email.strip()
+    address = address.strip()
+
+    # -----------------------------
+    # Company Name Validation
+    # -----------------------------
+
+    if not name:
+        return "Company name is required."
+
+    if len(name) < 2:
+        return "Company name must contain at least 2 characters."
+
+    if len(name) > 100:
+        return "Company name must not exceed 100 characters."
+
+    # -----------------------------
+    # Contact Person Validation
+    # -----------------------------
+
+    if not contact_person:
+        return "Contact person is required."
+
+    if len(contact_person) < 2:
+        return "Contact person must contain at least 2 characters."
+
+    if len(contact_person) > 100:
+        return "Contact person must not exceed 100 characters."
+
+    # Allows letters, spaces, apostrophes and hyphens
+    if not re.fullmatch(r"[A-Za-zÀ-ÿ' -]+", contact_person):
+        return "Contact person contains invalid characters."
+
+    # -----------------------------
+    # Phone Number Validation
+    # -----------------------------
+
+    if not phone:
+        return "Phone number is required."
+
+    # Remove spaces, brackets and hyphens for validation
+    clean_phone = re.sub(r"[\s()-]", "", phone)
+
+    # South African format:
+    # 0821234567
+    # +27821234567
+    if not re.fullmatch(r"(?:\+27|0)[1-9][0-9]{8}", clean_phone):
+        return "Enter a valid South African phone number."
+
+    # -----------------------------
+    # Email Validation
+    # -----------------------------
+
+    if not email:
+        return "Email address is required."
+
+    if len(email) > 254:
+        return "Email address is too long."
+
+    email_pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
+
+    if not re.fullmatch(email_pattern, email):
+        return "Enter a valid email address."
+
+    # -----------------------------
+    # Address Validation
+    # -----------------------------
+
+    if not address:
+        return "Physical address is required."
+
+    if len(address) < 5:
+        return "Physical address is too short."
+
+    if len(address) > 250:
+        return "Physical address must not exceed 250 characters."
+
+    # -----------------------------
+    # Validation successful
+    # -----------------------------
+
+    return None
+    
+
+def transfer_stock(item_id, qty):
+    # Moves quantity from warehouse_stock to store_stock.
+
     conn = get_conn()
     c = conn.cursor()
-    c.execute("SELECT quantity FROM warehouse_stock WHERE item_id=?", (item_id,))					# Checks available warehouse quantity.
+
+    # Reject invalid quantities.
+    if qty <= 0:
+        conn.close()
+        return False
+
+    # Check available warehouse quantity.
+    c.execute(
+        "SELECT quantity FROM warehouse_stock WHERE item_id=?",
+        (item_id,)
+    )
+
     wh_qty = c.fetchone()
-    
+
     if wh_qty and wh_qty[0] >= qty:
-        # Deduct from Warehouse
-        c.execute("UPDATE warehouse_stock SET quantity = quantity - ? WHERE item_id=?", (qty, item_id))
-        # Add to Store (Upsert)
-        c.execute("""
-            INSERT INTO store_stock (item_id, quantity) VALUES (?, ?)
-            ON CONFLICT(item_id) DO UPDATE SET quantity = quantity + ?
-        """, (item_id, qty, qty))
+
+        # Deduct from Warehouse.
+        c.execute(
+            "UPDATE warehouse_stock "
+            "SET quantity = quantity - ? "
+            "WHERE item_id=?",
+            (qty, item_id)
+        )
+
+        # Add to Store.
+        # If the item already exists, increase its quantity.
+        c.execute(
+            """
+            INSERT INTO store_stock (item_id, quantity)
+            VALUES (?, ?)
+            ON CONFLICT(item_id)
+            DO UPDATE SET quantity = quantity + ?
+            """,
+            (item_id, qty, qty)
+        )
+
         conn.commit()
         success = True
+
     else:
         success = False
 
-	#Add function to remove damaged stock from warehouse and store front
-
     conn.close()
-    return success
 
+    return success
 # --- Barcode & PDF Logic ---
 
 def ean13_checksum(code_str):
@@ -737,7 +887,7 @@ elif menu == "📦 Inventory":
                     
                     # Correct Date conversion to prevent StreamlitAPIException
                     try:
-                        expiry_default = pd.to_datetime(item_row['expiry_date']).date() if item_row['expiry_date'] else date.today()
+                        expiry_default = pd.to_datetime(item_row['expiry_date']).date() if item_row['expiry_date'] else datetime.today()
                     except:
                         #expiry_default = date.today()
                         expiry_default = None
@@ -930,21 +1080,67 @@ elif menu == "🚚 Suppliers & PO":
             s_email = c2.text_input("Email Address")
             s_addr = st.text_area("Physical Address")
             if st.form_submit_button("Save Supplier"):
-                conn = get_conn()
-                conn.execute("INSERT INTO suppliers (name, contact_person, phone, email, address) VALUES (?,?,?,?,?)",
-                             (s_name, s_cont, s_phone, s_email, s_addr))
-                conn.commit()
-                st.success("Supplier Profile Created")
-        st.divider()
-        conn = get_conn()
-        st.subheader("Existing Suppliers")
-        st.dataframe(pd.read_sql("SELECT * FROM suppliers", conn), width="stretch")
+
+                # Validate all supplier input first.
+                validation_error = validate_supplier(
+                    s_name,
+                    s_cont,
+                    s_phone,
+                    s_email,
+                    s_addr
+                )
+
+                # Stop the database operation if validation fails.
+                if validation_error:
+                    st.error(validation_error)
+
+                else:
+                    conn = get_conn()
+
+                    try:
+                        # Insert validated supplier information.
+                        # ? placeholders protect against SQL injection.
+                        conn.execute(
+                            """
+                            INSERT INTO suppliers
+                            (name, contact_person, phone, email, address)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (
+                                s_name.strip(),
+                                s_cont.strip(),
+                                s_phone.strip(),
+                                s_email.strip(),
+                                s_addr.strip()
+                            )
+                        )
+
+                        conn.commit()
+
+                        st.success("Supplier Profile Created")
+
+                    except sqlite3.IntegrityError:
+                        # The name column is UNIQUE.
+                        # This catches duplicate supplier names.
+                        st.error(
+                            "A supplier with this company name already exists."
+                        )
+
+                    finally:
+                        # Always close the database connection.
+                        conn.close()
+                        
+    st.divider()
+    conn = get_conn()
+
+    st.subheader("Existing Suppliers")
+    st.dataframe(pd.read_sql("SELECT * FROM suppliers", conn), width="stretch")
 
     with t2:
         st.write("Recent POs")
         conn = get_conn()
         st.dataframe(pd.read_sql("SELECT * FROM purchase_orders", conn), width="stretch")
-        conn.close()
+    conn.close()
 
 # ======================================================
 # 4. REPORTS
