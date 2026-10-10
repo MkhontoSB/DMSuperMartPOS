@@ -1,13 +1,15 @@
 import streamlit as st		# Imports Streamlit to build the web UI
 import sqlite3			# SQLite database driver for local storage
 import pandas as pd		# Pandas for reading/writing tabular data from the DB or CSV
-import datetime			# Standard library for date/time stamping
+import datetime		# Standard library for date/time stamping
 import time			# Standard library for timestamps and delays
 import io			# In-memory binary streams for generating PDFs without writing to disk
 import cv2			# OpenCV for image processing
 import numpy as np		# NumPy; indirectly used with OpenCV frames
 import re
 import av
+import secrets
+import hashlib
 import queue
 from pyzbar import pyzbar	# Barcode decoding from image frames.
 #from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode			# Real-time webcam streaming and frame transforms in Streamlit
@@ -18,6 +20,8 @@ from reportlab.lib.pagesizes import A4								# PDF page size constant
 from reportlab.lib.styles import getSampleStyleSheet						# Basic text styles for PDF.
 from reportlab.lib import colors								# Color constants for PDF styling
 from reportlab.graphics.shapes import Drawing
+from st_cookie import CookieManager
+from datetime import timezone, timedelta
 from argon2 import PasswordHasher # for password hashing
 
 # ======================================================
@@ -26,17 +30,19 @@ from argon2 import PasswordHasher # for password hashing
 st.set_page_config(page_title="SuperMart POS Suite", layout="wide", page_icon="🛒")		# Sets the Streamlit page title, layout (wide), and icon (shopping cart).
 DB_NAME = "inventory.db"								# Defines the SQLite file name called inventory.db that is used across the app.
 pwh = PasswordHasher()
+cookie_manager = CookieManager()
+
 
 # ======================================================
 # DATABASE MANAGER
 # ======================================================
 
-def get_conn():												# Returns a SQLite connection to the global DB file
-    return sqlite3.connect(DB_NAME, check_same_thread=False)						# Allows using the connection across Streamlit’s thread model
+def get_conn():			# Returns a SQLite connection to the global DB file
+    return sqlite3.connect(DB_NAME, check_same_thread=False)	# Allows using the connection across Streamlit’s thread model
 
-def init_db():												# Creates all required tables and seeds a default admin user
-    conn = get_conn()											# Opens DB
-    c = conn.cursor()											# Opens a cursor
+def init_db():								# Creates all required tables and seeds a default admin user
+    conn = get_conn()						# Opens DB
+    c = conn.cursor()						# Opens a cursor
 
     # 1. Users: Users table with unique username, plaintext password (demo), role
     c.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -48,6 +54,18 @@ def init_db():												# Creates all required tables and seeds a default admi
     # Default admin hashed to prevent plain password from being stored in database
     admin_password = "admin123"
     admin_password = pwh.hash(admin_password)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            revoked_at TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    """)
 
     c.execute(
     "INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
@@ -178,6 +196,100 @@ def authenticate(username, password):											# Looks up user by username/pass
 
     except Exception:
         return None
+
+def create_session(user_id, hours = 8):
+    """
+    Generate a secure session token and store only its hash
+    Return the raw token so the browser can store it later.
+    """
+
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    now = datetime.datetime.now(timezone.utc)
+    created_at = now.isoformat()
+    expires_at = (now + timedelta(hours = hours)).isoformat()
+
+    conn = get_conn()
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO user_sessions
+                (user_id, token_hash, created_at, expires_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (user_id, token_hash, created_at, expires_at)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return token
+
+
+def validate_session(token):
+    """
+    Validate a session token and return the associated user.
+    Return None if the token is invalid, expired, or revoked.
+    """
+    if not isinstance(token, str) or not token:
+        return None
+
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = datetime.datetime.now(timezone.utc).isoformat()
+
+    conn = get_conn()
+
+    try:
+        user = conn.execute(
+            """
+            SELECT u.user_id, u.username, u.role
+            FROM user_sessions AS s
+            JOIN users as u ON u.user_id = s.user_id
+            WHERE s.token_hash = ?
+                AND s.revoked_at IS NULL
+                AND s.expires_at > ?
+            """,
+            (token_hash, now)
+        ).fetchone()
+
+        if user is None:
+            return None
+
+        return {
+            "id": user[0],
+            "name": user[1],
+            "role": user[2]
+        }
+    finally:
+        conn.close()
+
+def revoke_session(token):
+    """
+    Invalidate a session so it cannot be reused.
+    """
+    if not isinstance(token, str) or not token:
+        return
+
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    revoked_at = datetime.datetime.now(timezone.utc).isoformat()
+
+    conn = get_conn()
+
+    try:
+        conn.execute(
+            """
+            UPDATE user_sessions
+            SET revoked_at = ?
+            WHERE token_hash = ?
+                AND revoked_at IS NULL
+            """,
+            (revoked_at, token_hash)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 def validate_supplier(name, contact_person, phone, email, address):
     """
@@ -477,32 +589,115 @@ class BarcodeProcessor(VideoProcessorBase):
 
 init_db()
 
+
+# Load browser cookies into streamlit session state.
+cookie_manager.apply()
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = ""
+
 # Initialize Session
-if 'user' not in st.session_state: st.session_state.user = None
-if 'cart' not in st.session_state: st.session_state.cart = []
+if 'user' not in st.session_state: 
+    st.session_state.user = None
+
+if 'cart' not in st.session_state: 
+    st.session_state.cart = []
+
+if st.session_state.user is None:
+    saved_token = st.session_state.get("auth_token","")
+
+    if saved_token:
+        restored_user = validate_session(saved_token)
+
+        if restored_user:
+            st.session_state.user = restored_user
+            st.session_state.session_token = saved_token
+
+        else:
+            # revoked token.
+            st.session_state.user = None
+            st.session_state.session_token = None
+            st.session_state.auth_token = ""
+            cookie_manager.update("auth_token")
 
 # --- LOGIN ---
 if not st.session_state.user:
     st.markdown("<h1 style='text-align: center;'>🔐 SuperMart POS Login</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,2,1])
+
     with c2:
         with st.form("login"):
             u = st.text_input("Username")
             p = st.text_input("Password", type="password")
+
             if st.form_submit_button("Login", width="stretch"):
                 user = authenticate(u, p)
+
                 if user:
-                    st.session_state.user = {'id': user[0], 'role': user[1], 'name': u}
-                    st.rerun()
+                    user_id, role = user
+
+                    try:
+                        token = create_session(user_id, hours = 8)
+
+                        # save the token in server-side session state
+
+
+                        st.session_state.session_token = token
+                        st.session_state.auth_token = token
+
+                        # set the cookie so the token can be restored after refresh.
+                        cookie_manager.update("auth_token")
+
+                        # store the authenticated user's details
+                        conn = get_conn()
+
+                        try:
+                            row = conn.execute(
+                                "SELECT user_id, username, role FROM users WHERE user_id = ?",
+                                (user_id,)
+                            ).fetchone()
+                        finally:
+                            conn.close()
+
+                        if row:
+                            st.session_state.user = {
+                                "id": row[0],
+                                "name": row[1],
+                                "role": row[2]
+                            }
+                            st.rerun()
+                        else:
+                            revoke_session(token)
+                            st.session_state.user = None
+                            st.session_state.auth_token = ""
+                            cookie_manager.update("auth_token")
+                            st.error("Unable to load your user profile.")
+
+                    except sqlite3.Error:
+                        st.error("unable to create your login session")
+
                 else:
-                    st.error("Invalid Credentials")
+                    st.error("Invalid credentials.")
+
     st.stop()
 
 # --- SIDEBAR & NAV ---
 st.sidebar.title(f"👤 {st.session_state.user['name']}")
 st.sidebar.info(f"Role: {st.session_state.user['role']}")
 if st.sidebar.button("Logout"):
+    token = st.session_state.get("session_token")
+
+    # Invalidate the session in SQLite
+    if token:
+        revoke_session(token)
+
+    # clear the authentication state.
     st.session_state.user = None
+    st.session_state.session_token = None
+    st.session_state.auth_token = ""
+
+    # Synchronize the cleared token with the browser cookie.
+    cookie_manager.update("auth_token")
+
     st.rerun()
 
 menu = st.sidebar.radio("Navigation", ["🛒 POS Register", "📦 Inventory", "🚚 Suppliers & PO", "📊 Reports"])
