@@ -8,3 +8,6 @@ av
 streamlit-webrtc
 argon2-cffi
 st-cookie
+pytest
+"fastapi>=0.115,<1.0"
+"SQLAlchemy>=2.0,<3.0"

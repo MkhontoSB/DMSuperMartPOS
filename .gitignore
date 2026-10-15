@@ -1,0 +1,17 @@
+# .gitignore - merge these entries into the existing file
+.env
+.env.*
+!.env.example
+inventory.db
+inventory.db-*
+backups/
+*.sqlite
+*.sqlite3
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+web/dist/
+*.pdf

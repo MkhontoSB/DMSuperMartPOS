@@ -51,9 +51,7 @@ def init_db():								# Creates all required tables and seeds a default admin us
         password TEXT NOT NULL,
         role TEXT NOT NULL
     )""")
-    # Default admin hashed to prevent plain password from being stored in database
-    admin_password = "admin123"
-    admin_password = pwh.hash(admin_password)
+    
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_sessions (
@@ -66,13 +64,6 @@ def init_db():								# Creates all required tables and seeds a default admin us
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
     """)
-
-    c.execute(
-    "INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)",
-    ("admin", admin_password, "admin")
-    ) # Seeds an admin if not present
-
-    
 
     # 2. Suppliers: Suppliers table with contact info; name is unique.
     c.execute("""CREATE TABLE IF NOT EXISTS suppliers (
@@ -157,12 +148,7 @@ def init_db():								# Creates all required tables and seeds a default admin us
     """)
 
 
-    # ensure single row
-    c.execute("""
-        INSERT INTO Barcode (last_scanned)
-        SELECT NULL
-        WHERE NOT EXISTS (SELECT 1 FROM Barcode)
-    """)
+    
     # 8. Persist changes and close connection.
     conn.commit()
     conn.close()
@@ -291,102 +277,7 @@ def revoke_session(token):
     finally:
         conn.close()
 
-def validate_supplier(name, contact_person, phone, email, address):
-    """
-    Validates supplier information before it is stored in the database.
 
-    Returns:
-        None if all input is valid.
-        An error message if validation fails.
-    """
-
-    # Remove unnecessary spaces from the beginning and end
-    name = name.strip()
-    contact_person = contact_person.strip()
-    phone = phone.strip()
-    email = email.strip()
-    address = address.strip()
-
-    # -----------------------------
-    # Company Name Validation
-    # -----------------------------
-
-    if not name:
-        return "Company name is required."
-
-    if len(name) < 2:
-        return "Company name must contain at least 2 characters."
-
-    if len(name) > 100:
-        return "Company name must not exceed 100 characters."
-
-    # -----------------------------
-    # Contact Person Validation
-    # -----------------------------
-
-    if not contact_person:
-        return "Contact person is required."
-
-    if len(contact_person) < 2:
-        return "Contact person must contain at least 2 characters."
-
-    if len(contact_person) > 100:
-        return "Contact person must not exceed 100 characters."
-
-    # Allows letters, spaces, apostrophes and hyphens
-    if not re.fullmatch(r"[A-Za-zÀ-ÿ' -]+", contact_person):
-        return "Contact person contains invalid characters."
-
-    # -----------------------------
-    # Phone Number Validation
-    # -----------------------------
-
-    if not phone:
-        return "Phone number is required."
-
-    # Remove spaces, brackets and hyphens for validation
-    clean_phone = re.sub(r"[\s()-]", "", phone)
-
-    # South African format:
-    # 0821234567
-    # +27821234567
-    if not re.fullmatch(r"(?:\+27|0)[1-9][0-9]{8}", clean_phone):
-        return "Enter a valid South African phone number."
-
-    # -----------------------------
-    # Email Validation
-    # -----------------------------
-
-    if not email:
-        return "Email address is required."
-
-    if len(email) > 254:
-        return "Email address is too long."
-
-    email_pattern = r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$"
-
-    if not re.fullmatch(email_pattern, email):
-        return "Enter a valid email address."
-
-    # -----------------------------
-    # Address Validation
-    # -----------------------------
-
-    if not address:
-        return "Physical address is required."
-
-    if len(address) < 5:
-        return "Physical address is too short."
-
-    if len(address) > 250:
-        return "Physical address must not exceed 250 characters."
-
-    # -----------------------------
-    # Validation successful
-    # -----------------------------
-
-    return None
-    
 
 def transfer_stock(item_id, qty):
     # Moves quantity from warehouse_stock to store_stock.
@@ -439,13 +330,6 @@ def transfer_stock(item_id, qty):
 
     return success
 # --- Barcode & PDF Logic ---
-
-def ean13_checksum(code_str):
-    code = ''.join(filter(str.isdigit, str(code_str)))
-    code = code[:12].zfill(12)
-    digits = [int(x) for x in code]
-    checksum = (10 - ((sum(digits[::2]) + sum(digits[1::2]) * 3) % 10)) % 10
-    return code + str(checksum)
 
 def generate_barcode_pdf(item_data, barcode_type, qty_per_item):
     buffer = io.BytesIO()
@@ -586,8 +470,6 @@ class BarcodeProcessor(VideoProcessorBase):
 # ======================================================
 # MAIN APPLICATION
 # ======================================================
-
-init_db()
 
 
 # Load browser cookies into streamlit session state.
