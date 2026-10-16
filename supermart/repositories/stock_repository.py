@@ -97,3 +97,11 @@ def apply_stock_transfer(
 
     db.flush()
     return True
+
+
+def list_warehouse_inventory(db: Session) -> list[WarehouseStock]:
+    """Return warehouse inventory in a consistent order."""
+    statement = select(WarehouseStock).order_by(
+        WarehouseStock.item_id
+    )
+    return list(db.scalars(statement).all())
