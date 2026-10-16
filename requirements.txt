@@ -9,5 +9,7 @@ streamlit-webrtc
 argon2-cffi
 st-cookie
 pytest
-"fastapi>=0.115,<1.0"
-"SQLAlchemy>=2.0,<3.0"
+fastapi>=0.115,<1.0
+SQLAlchemy>=2.0,<3.0
+PyJWT>=2.10,<3.0
+pydantic-settings>=2.0,<3.0 
