@@ -1,76 +1,99 @@
-# stock_repository.py
+# supermart/api/stock_repository.py
 
-import sqlite3
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from your_database_module import get_conn
-
-
-def get_warehouse_quantity(item_id):
-    conn = get_conn()
-
-    try:
-        row = conn.execute(
-            """
-            SELECT quantity
-            FROM warehouse_stock
-            WHERE item_id = ?
-            """,
-            (item_id,),
-        ).fetchone()
-
-        return row[0] if row else None
-    finally:
-        conn.close()
+from supermart.models import (
+    AuditEvent,
+    StockMovement,
+    StoreStock,
+    WarehouseStock,
+)
 
 
-def apply_stock_transfer(item_id, qty):
-    """Execute the stock movement in one transaction."""
+def get_warehouse_quantity(db: Session, item_id: str) -> int | None:
+    """Return the warehouse quantity for an item, or None if absent."""
+    warehouse_stock = db.get(WarehouseStock, item_id)
 
-    conn = get_conn()
+    if warehouse_stock is None:
+        return None
 
-    try:
-        conn.execute("BEGIN IMMEDIATE")
+    return warehouse_stock.quantity
 
-        row = conn.execute(
-            """
-            SELECT quantity, Product_Category
-            FROM warehouse_stock
-            WHERE item_id = ?
-            """,
-            (item_id,),
-        ).fetchone()
 
-        if row is None or row[0] is None or row[0] < qty:
-            conn.rollback()
-            return False
+def apply_stock_transfer(
+    db: Session,
+    item_id: str,
+    qty: int,
+    store_id: int,
+    actor_user_id: int,
+) -> bool:
+    """
+    Apply a warehouse-to-store transfer.
 
-        category = row[1]
+    The caller owns the transaction and must commit on success or
+    roll back on failure.
+    """
+    warehouse_stock = db.scalar(
+        select(WarehouseStock)
+        .where(WarehouseStock.item_id == item_id)
+        .with_for_update()
+    )
 
-        conn.execute(
-            """
-            UPDATE warehouse_stock
-            SET quantity = quantity - ?
-            WHERE item_id = ?
-            """,
-            (qty, item_id),
+    if warehouse_stock is None or warehouse_stock.quantity < qty:
+        return False
+
+    store_stock = db.scalar(
+        select(StoreStock)
+        .where(
+            StoreStock.store_id == store_id,
+            StoreStock.item_id == item_id,
         )
+        .with_for_update()
+    )
 
-        conn.execute(
-            """
-            INSERT INTO store_stock
-                (item_id, Product_Category, quantity)
-            VALUES (?, ?, ?)
-            ON CONFLICT(item_id)
-            DO UPDATE SET quantity = quantity + excluded.quantity
-            """,
-            (item_id, category, qty),
+    # Deduct from the warehouse.
+    warehouse_stock.quantity -= qty
+
+    # Add to the selected store, creating its stock row if necessary.
+    if store_stock is None:
+        store_stock = StoreStock(
+            store_id=store_id,
+            item_id=item_id,
+            quantity=qty,
+            product_category=warehouse_stock.product_category,
         )
+        db.add(store_stock)
+    else:
+        store_stock.quantity += qty
 
-        conn.commit()
-        return True
+    # Record the movement in the stock-movement ledger.
+    db.add(
+        StockMovement(
+            item_id=item_id,
+            source_location_type="warehouse",
+            source_store_id=None,
+            destination_location_type="store",
+            destination_store_id=store_id,
+            quantity=qty,
+            actor_user_id=actor_user_id,
+        )
+    )
 
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    # Also record the operation in the general audit log.
+    db.add(
+        AuditEvent(
+            actor_user_id=actor_user_id,
+            action="stock.transfer",
+            resource_type="stock_transfer",
+            resource_id=f"{store_id}:{item_id}",
+            details=(
+                f"Warehouse to store {store_id}; "
+                f"item {item_id}; quantity {qty}"
+            ),
+            outcome="success",
+        )
+    )
+
+    db.flush()
+    return True

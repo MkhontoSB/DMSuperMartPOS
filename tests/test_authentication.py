@@ -71,8 +71,6 @@ def test_token_round_trip():
     assert claims["sub"] == "1"
 
 
-
-
 def test_expired_token_is_rejected():
     now = datetime.now(timezone.utc)
 
