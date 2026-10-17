@@ -1,5 +1,3 @@
-# supermart/models.py - representative SQLAlchemy 2.x models
-
 # supermart/models.py
 
 from datetime import datetime
