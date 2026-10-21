@@ -1,15 +1,12 @@
 # config.py
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     database_url: str
-
-    # Must be supplied through the JWT_SECRET_KEY environment variable.
     jwt_secret_key: str = Field(min_length=32, repr=False)
-
     session_hours: int = 8
     app_env: str = "development"
     cors_origins: list[str] = Field(default_factory=list)
@@ -21,10 +18,35 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @model_validator(mode="after")
+    def validate_security_settings(self):
+        if self.session_hours != 8:
+            raise ValueError(
+                "This release requires an eight-hour session lifetime"
+            )
+
+        if self.app_env.strip().lower() in {"production", "prod"}:
+            secret = self.jwt_secret_key.strip()
+
+            if (
+                len(secret) < 32
+                or "REPLACE_WITH" in secret.upper()
+            ):
+                raise ValueError(
+                    "Production requires an independently generated JWT secret"
+                )
+
+            if not self.cors_origins:
+                raise ValueError(
+                    "Production requires explicit CORS_ORIGINS"
+                )
+
+            if "*" in self.cors_origins:
+                raise ValueError(
+                    "Wildcard CORS origins are not allowed in production"
+                )
+
+        return self
+
 
 settings = Settings()
-
-if settings.session_hours != 8:
-    raise ValueError(
-        "This release requires an eight-hour session lifetime"
-    )
