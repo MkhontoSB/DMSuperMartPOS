@@ -15,3 +15,5 @@ venv/
 node_modules/
 web/dist/
 *.pdf
+!.env.compose.example
+.env.compose
