@@ -17,3 +17,5 @@ web/dist/
 *.pdf
 !.env.compose.example
 .env.compose
+
+supermart_audit_contents.txt

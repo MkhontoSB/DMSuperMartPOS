@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from supermart.api.routes.inventory import router as inventory_router
+from supermart.api.routes.inventory_features import router as inventory_features_router
 from supermart.config import settings
 from supermart.database import SessionLocal
 
@@ -17,6 +18,8 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+
+app.include_router(inventory_features_router)
 app.include_router(inventory_router)
 
 

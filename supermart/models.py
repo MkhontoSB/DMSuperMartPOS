@@ -306,7 +306,9 @@ class AuditEvent(Base):
     __tablename__ = "audit_events"
 
     event_id: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
     )
     actor_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger,
